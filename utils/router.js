@@ -62,6 +62,9 @@ class Server {
     getScore(strategy) {
         const avgResponseTime = this.getAverageResponseTime();
         console.log("strategy is: ", strategy);
+
+        // queue management
+
         switch (strategy) {
             case 'FIFO':
                 return avgResponseTime * this.weight + this.requestQueue.length;
@@ -104,6 +107,8 @@ const getNextServer = (apiType, strategy) => {
 
             console.log("score is: ", score, serverConfig);
 
+            // score is based on average time, weight (servers with highest weight can handle more request) and queue (total number of requests the server already has) taken by the server request, server with min score is choosed
+
             if (score < minScore) {
                 minScore = score;
                 selectedServer = serverConfig;
@@ -112,8 +117,12 @@ const getNextServer = (apiType, strategy) => {
     });
 
     if (selectedServer) {
+
         console.log(`Selected server: ${selectedServer.port} with score: ${minScore}`);
     } else {
+
+        // random server choosed if average time taen is INFINITY, but here value is 0 
+
         const randomIndex = Math.floor(Math.random() * serversForApiType.length);
         selectedServer = servers.find(server => server.port === serversForApiType[randomIndex].port);
 
