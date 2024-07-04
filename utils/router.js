@@ -29,7 +29,7 @@ class Server {
                 console.log("current load: ", this.currentLoad);
 
                 // Log request details
-                logRequest(`Request to http://localhost:${this.port}${request.path} took ${duration}ms: , Average time: ${this.requestCount > 0 ? this.getAverageResponseTime() : 'N/A'} ms, request counts are: ${this.requestCount}`);
+                logRequest(`Request to http://localhost:${this.port}${request.path} took ${duration}ms: , Average time: ${this.requestCount > 0 ? this.getAverageResponseTime() : 'N/A'} ms, request counts are: ${this.requestCount}, strategy: ${request.strategy}`);
 
                 // Send response to the client
                 request.resolve(response.data);
@@ -41,20 +41,37 @@ class Server {
         }
     }
 
-    enqueueRequest(path, resolve, reject, startTime) {
-        this.requestQueue.push({ path, resolve, reject, startTime });
+    enqueueRequest(path, resolve, reject, startTime, strategy) {
+        this.requestQueue.push({ path, resolve, reject, startTime, strategy });
         this.currentLoad += 1;
         console.log("current load is: ", this.currentLoad);
         this.handleRequest(); // Start processing the queued request
     }
 
-    getAverageResponseTime() {
-        return this.requestCount > 0 ? this.totalTime / this.requestCount : Infinity;
+    enqueueRequestPriority(path, resolve, reject, startTime, priority, strategy) {
+        this.requestQueue.push({ path, resolve, reject, startTime, priority, strategy });
+        this.requestQueue.sort((a, b) => b.priority - a.priority);
+        this.currentLoad += 1;
+        this.handleRequest();
     }
 
-    getScore() {
+    getAverageResponseTime() {
+        return this.requestCount > 0 ? this.totalTime / this.requestCount : 0;
+    }
+
+    getScore(strategy) {
         const avgResponseTime = this.getAverageResponseTime();
-        return avgResponseTime * this.weight + this.requestQueue.length;
+        console.log("strategy is: ", strategy);
+        switch (strategy) {
+            case 'FIFO':
+                return avgResponseTime * this.weight + this.requestQueue.length;
+            case 'Priority':
+                return avgResponseTime * this.weight + this.requestQueue.reduce((acc, req) => acc + req.priority, 0);
+            case 'RoundRobin':
+                return this.currentLoad;
+            default:
+                return avgResponseTime * this.weight + this.requestQueue.length;
+        }
     }
 }
 
@@ -70,46 +87,57 @@ const apis = {
     grpc: servers.map(server => `http://localhost:${server.port}/grpc`),
 };
 
-const getNextServer = (apiType) => {
+const getNextServer = (apiType, strategy) => {
     const serversForApiType = apis[apiType];
+    if (!serversForApiType) {
+        console.log(`No servers found for API type: ${apiType}`);
+        return null;
+    }
+
     let selectedServer = null;
     let minScore = Infinity;
 
     serversForApiType.forEach(url => {
-        console.log("url: ", url);
         const serverConfig = servers.find(server => url.includes(server.port));
-        console.log("server config: ", serverConfig);
         if (serverConfig) {
-            const avgResponseTime = serverConfig.requestCount > 0 ? serverConfig.totalTime / serverConfig.requestCount : 0;
-            const score = avgResponseTime * serverConfig.weight + serverConfig.requestQueue.length;
-            
+            const score = serverConfig.getScore(strategy);
+
+            console.log("score is: ", score, serverConfig);
+
             if (score < minScore) {
                 minScore = score;
                 selectedServer = serverConfig;
             }
-
-            console.log("score is: ", url, score);
         }
-
-        console.log("server config: ", serverConfig.requestCount, serverConfig.requestQueue, serverConfig.getAverageResponseTime());
     });
+
+    if (selectedServer) {
+        console.log(`Selected server: ${selectedServer.port} with score: ${minScore}`);
+    } else {
+        const randomIndex = Math.floor(Math.random() * serversForApiType.length);
+        selectedServer = servers.find(server => server.port === serversForApiType[randomIndex].port);
+
+        console.log(`No available servers for API type: ${apiType} and strategy: ${strategy}`);
+    }
 
     return selectedServer ? `http://localhost:${selectedServer.port}/${apiType}` : null;
 };
 
 const routeRequest = async (req, res) => {
     const { apiType } = req.params;
+    const strategy = req.query.strategy || 'FIFO';
 
     if (!apis[apiType]) {
         return res.status(400).send("Invalid API type");
     }
-    
-    const url = getNextServer(apiType);
+
+    const url = getNextServer(apiType, strategy);
+
 
     if (!url) {
         return res.status(500).send("No available servers");
     }
-    
+
     const serverConfig = servers.find(server => url.includes(server.port));
 
     if (!serverConfig) {
@@ -121,7 +149,14 @@ const routeRequest = async (req, res) => {
     try {
         const start = Date.now();
         const response = await new Promise((resolve, reject) => {
-            serverConfig.enqueueRequest(`/${apiType}`, resolve, reject, start);
+            if (strategy === 'Priority') {
+                const priority = parseInt(req.query.priority) || 0;
+                console.log("strategy defined is: ", strategy);
+                serverConfig.enqueueRequestPriority(`/${apiType}`, resolve, reject, start, priority, strategy);
+            } else {
+                console.log("strategy defined is: ", strategy);
+                serverConfig.enqueueRequest(`/${apiType}`, resolve, reject, start, strategy);
+            }
         });
 
         res.json(response);
@@ -132,3 +167,10 @@ const routeRequest = async (req, res) => {
 };
 
 module.exports = { routeRequest };
+
+
+// to run these commands
+
+// FIFO: http://localhost:3000/api/rest?strategy=FIFO
+// Priority: http://localhost:3000/api/rest?strategy=Priority&priority=5
+// RoundRobin: http://localhost:3000/api/rest?strategy=RoundRobin
